@@ -51,6 +51,11 @@ New-NetFirewallRule -DisplayName "RDP-In" `
     -Direction Inbound -Protocol TCP -LocalPort 3389 `
     -RemoteAddress $extSubnet, $intSubnet -Action Allow | Out-Null
 
+# Allow SSH for management
+New-NetFirewallRule -DisplayName "SSH-In" `
+    -Direction Inbound -Protocol TCP -LocalPort 22 `
+    -RemoteAddress $extSubnet, $intSubnet -Action Allow | Out-Null
+
 # Allow zone transfer from primary DNS (node2) - needed
 New-NetFirewallRule -DisplayName "ZoneTransfer-from-Primary" `
     -Direction Inbound -Protocol TCP -LocalPort 53 `
@@ -58,8 +63,8 @@ New-NetFirewallRule -DisplayName "ZoneTransfer-from-Primary" `
 
 # Display results
 Write-Host "=== Active Firewall Rules ===" -ForegroundColor Cyan
-Get-NetFirewallRule | Where-Object { $_.DisplayName -like "DNS*" -or $_.DisplayName -like "ICMP*" -or $_.DisplayName -like "RDP*" -or $_.DisplayName -like "ZoneTransfer*" } | Format-Table DisplayName, Action, Enabled
+Get-NetFirewallRule | Where-Object { $_.DisplayName -like "DNS*" -or $_.DisplayName -like "ICMP*" -or $_.DisplayName -like "RDP*" -or $_.DisplayName -like "SSH*" -or $_.DisplayName -like "ZoneTransfer*" } | Format-Table DisplayName, Action, Enabled
 
 Write-Host "=== Firewall configuration complete ===" -ForegroundColor Green
 Write-Host "  Profile: Public (default-inbound: Block)"
-Write-Host "  Allowed: DNS, ICMP, RDP from trusted subnets"
+Write-Host "  Allowed: DNS, ICMP, RDP, SSH from trusted subnets"

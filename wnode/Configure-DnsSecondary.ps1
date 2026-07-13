@@ -33,10 +33,16 @@ Add-DnsServerSecondaryZone -Name "$X.168.192.in-addr.arpa" `
 Write-Host "=== Configuring Forwarders ===" -ForegroundColor Cyan
 Set-DnsServerForwarder -IPAddress $ForwarderIP -PassThru
 
-Write-Host "=== Forcing Zone Transfer from Primary ===" -ForegroundColor Cyan
+Write-Host "=== Triggering Zone Transfer from Primary ===" -ForegroundColor Cyan
 Start-Sleep -Seconds 2
-Request-DnsServerZoneTransfer -ZoneName $Domain -FullTransfer -ComputerName $PrimaryIP -PassThru
-Request-DnsServerZoneTransfer -ZoneName "$X.168.192.in-addr.arpa" -FullTransfer -ComputerName $PrimaryIP -PassThru
+try {
+    # Zone transfer happens automatically via NOTIFY; force a refresh
+    Get-DnsServerZone -Name $Domain, "$X.168.192.in-addr.arpa" | ForEach-Object {
+        Reset-DnsServerZoneSecondaries -ZoneName $_.ZoneName -Force
+    }
+} catch {
+    Write-Warning "Zone transfer trigger failed: $_ (node2 may be offline)"
+}
 
 Write-Host "=== Verifying Zones ===" -ForegroundColor Cyan
 Get-DnsServerZone | Format-Table ZoneName, ZoneType, IsAutoCreated
