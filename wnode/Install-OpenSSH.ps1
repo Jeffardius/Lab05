@@ -2,62 +2,59 @@
 .SYNOPSIS
     Installs and configures OpenSSH Server on node1 (Windows Server 2022).
 .DESCRIPTION
-    Run this as Administrator on the Windows VM first, then from gateway
-    you can use setup-passwordless-ssh-to-windows.sh to copy the key.
+    Downloads official Microsoft Win32-OpenSSH and installs it.
+    Run this as Administrator, then run setup-passwordless-ssh-to-windows.sh
+    from the gateway to copy the SSH key.
 #>
 
 Write-Host "=== Installing OpenSSH Server ===" -ForegroundColor Cyan
 
-# 1. Install OpenSSH Server capability
-$cap = Get-WindowsCapability -Online | Where-Object { $_.Name -like "OpenSSH.Server*" }
-if ($cap.State -ne "Installed") {
-    Write-Host "  Installing OpenSSH Server capability..."
-    $result = Add-WindowsCapability -Online -Name "OpenSSH.Server*"
-    if ($result.RestartNeeded -eq $true -or $result.RestartNeeded -eq $True) {
-        Write-Host "  A restart is required. Rebooting now..."
-        Restart-Computer -Force
-        exit
+# 1. Download official Microsoft OpenSSH
+$tmpDir = "$env:TEMP\OpenSSH"
+$zipPath = "$tmpDir\OpenSSH.zip"
+$installDir = "${env:ProgramFiles}\OpenSSH"
+$sshdPath = "$installDir\sshd.exe"
+
+if (-not (Test-Path $sshdPath)) {
+    Write-Host "  Downloading Microsoft Win32-OpenSSH..."
+    $repo = "PowerShell/Win32-OpenSSH"
+    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/latest"
+    $downloadUrl = $release.assets | Where-Object { $_.name -like "*OpenSSH-Win64*" -or $_.name -like "*Win32-OpenSSH*" } | Select-Object -First 1 -ExpandProperty browser_download_url
+    if (-not $downloadUrl) {
+        Write-Host "  Trying alternative download URL..."
+        $downloadUrl = "https://github.com/PowerShell/Win32-OpenSSH/releases/download/v9.5.0.0p1-Beta/OpenSSH-Win64-v9.5.0.0.msi"
     }
-    Write-Host "  OpenSSH Server installed."
-} else {
-    Write-Host "  OpenSSH Server already installed."
-}
 
-# 2. Locate sshd.exe (could be in multiple possible locations)
-$sshdPaths = @(
-    "$env:SystemRoot\System32\OpenSSH\sshd.exe",
-    "$env:SystemRoot\SysWOW64\OpenSSH\sshd.exe",
-    "${env:ProgramFiles}\OpenSSH\bin\sshd.exe",
-    "${env:ProgramFiles(x86)}\OpenSSH\bin\sshd.exe",
-    "$env:SystemRoot\System32\sshd.exe"
-)
+    New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+    Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath -UseBasicParsing
 
-$sshdPath = $null
-foreach ($p in $sshdPaths) {
-    if (Test-Path $p) {
-        $sshdPath = $p
-        break
+    Write-Host "  Extracting to $installDir..."
+    if ($zipPath -like "*.msi") {
+        Start-Process msiexec.exe -Wait -ArgumentList "/i `"$zipPath`" /qn TARGETDIR=`"$installDir`""
+    } else {
+        Expand-Archive -Path $zipPath -DestinationPath "$env:TEMP\OpenSSH-Extracted" -Force
+        $extracted = Get-ChildItem "$env:TEMP\OpenSSH-Extracted" -Directory | Select-Object -First 1
+        if (-not $extracted) { $extracted = "$env:TEMP\OpenSSH-Extracted" }
+        New-Item -ItemType Directory -Path $installDir -Force | Out-Null
+        Copy-Item "$($extracted.FullName)\*" -Destination $installDir -Recurse -Force
     }
+    Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-if (-not $sshdPath) {
-    Write-Host "  Searching all drives for sshd.exe..."
-    $sshdPath = Get-ChildItem -Path "$env:SystemDrive\" -Filter "sshd.exe" -Recurse -ErrorAction SilentlyContinue |
-        Select-Object -First 1 -ExpandProperty FullName
-}
-
-if (-not $sshdPath) {
-    Write-Host "  ERROR: sshd.exe not found anywhere. OpenSSH install may have failed." -ForegroundColor Red
-    Write-Host "  Try rebooting the VM and running this script again." -ForegroundColor Yellow
-    exit 1
+if (-not (Test-Path $sshdPath)) {
+    Write-Host "  ERROR: sshd.exe still not found. Trying DISM approach..." -ForegroundColor Red
+    Add-WindowsCapability -Online -Name "OpenSSH.Server*" | Out-Null
+    # Try again with system32 path
+    $sshdPath = "$env:SystemRoot\System32\OpenSSH\sshd.exe"
+    if (-not (Test-Path $sshdPath)) {
+        Write-Host "  Install failed. Reboot and retry, or install manually." -ForegroundColor Red
+        exit 1
+    }
 }
 
 Write-Host "  Found sshd.exe at: $sshdPath"
 
-# 3. Install and start the sshd service
-$sshdDir = Split-Path $sshdPath -Parent
-
-# Check if service already exists
+# 2. Install sshd service
 $sshdService = Get-Service -Name "sshd" -ErrorAction SilentlyContinue
 if (-not $sshdService) {
     Write-Host "  Installing sshd service..."
@@ -69,25 +66,24 @@ if (-not $sshdService) {
 if ($sshdService) {
     Set-Service -Name $sshdService.Name -StartupType Automatic
     Start-Service -Name $sshdService.Name
-    Write-Host "  sshd service started (automatic startup)."
+    Write-Host "  sshd service started (automatic)."
 } else {
-    Write-Host "  Service registration failed. Running sshd directly..."
+    Write-Host "  Service install failed. Running sshd directly..."
     Start-Process -FilePath $sshdPath -WindowStyle Hidden
     Start-Sleep -Seconds 2
 }
 
-# 4. Firewall rule for SSH
+# 3. Firewall rule
 $fwRule = Get-NetFirewallRule -DisplayName "OpenSSH-Server-In-TCP" -ErrorAction SilentlyContinue
 if (-not $fwRule) {
     New-NetFirewallRule -DisplayName "OpenSSH-Server-In-TCP" `
-        -Direction Inbound -Protocol TCP -LocalPort 22 `
-        -Action Allow
-    Write-Host "  Firewall rule added for SSH (TCP/22)."
+        -Direction Inbound -Protocol TCP -LocalPort 22 -Action Allow
+    Write-Host "  Firewall rule added."
 } else {
     Write-Host "  Firewall rule already exists."
 }
 
-# 5. Create .ssh directory and authorized_keys for Administrator
+# 4. Create .ssh dir for Administrator
 $sshDir = "$env:USERPROFILE\.ssh"
 $authKeys = Join-Path $sshDir "authorized_keys"
 if (-not (Test-Path $sshDir)) {
@@ -96,29 +92,28 @@ if (-not (Test-Path $sshDir)) {
 
 Write-Host ""
 Write-Host "=== NEXT STEP ===" -ForegroundColor Yellow
-Write-Host "From your gateway VM, run this to add the public key:" -ForegroundColor Yellow
-Write-Host ""
+Write-Host "From gateway, run:" -ForegroundColor Yellow
 Write-Host "  sudo ./gateway/setup-passwordless-ssh-to-windows.sh 33 YourAdminPassword" -ForegroundColor Green
 Write-Host ""
-Write-Host "Or manually paste the gateway's public key into this file:" -ForegroundColor Yellow
-Write-Host "  $authKeys" -ForegroundColor Cyan
+Write-Host "Or paste gateway's public key into: $authKeys" -ForegroundColor Yellow
 Write-Host ""
 
-# 6. Verify
+# 5. Verify
 Write-Host "=== Verification ===" -ForegroundColor Cyan
 $svc = Get-Service -Name "sshd" -ErrorAction SilentlyContinue
 $proc = Get-Process -Name "sshd" -ErrorAction SilentlyContinue
+$port = netstat -ano 2>$null | Select-String ":22 "
+
 if ($svc -and $svc.Status -eq "Running") {
-    Write-Host "  sshd service is RUNNING" -ForegroundColor Green
+    Write-Host "  sshd service: RUNNING" -ForegroundColor Green
 } elseif ($proc) {
-    Write-Host "  sshd process is RUNNING (PID: $($proc.Id))" -ForegroundColor Green
+    Write-Host "  sshd process: RUNNING" -ForegroundColor Green
 } else {
-    Write-Host "  sshd is NOT running. Try rebooting the VM." -ForegroundColor Yellow
+    Write-Host "  sshd: NOT running" -ForegroundColor Red
 }
 
-$port = netstat -ano | Select-String ":22 "
 if ($port) {
-    Write-Host "  SSH port 22 is LISTENING" -ForegroundColor Green
+    Write-Host "  Port 22: LISTENING" -ForegroundColor Green
 } else {
-    Write-Host "  SSH port 22 is NOT listening" -ForegroundColor Red
+    Write-Host "  Port 22: NOT listening" -ForegroundColor Red
 }
