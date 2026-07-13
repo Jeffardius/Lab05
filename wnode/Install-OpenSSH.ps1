@@ -13,8 +13,8 @@ $cap = Get-WindowsCapability -Online | Where-Object { $_.Name -like "OpenSSH.Ser
 if ($cap.State -ne "Installed") {
     Write-Host "  Installing OpenSSH Server capability..."
     $result = Add-WindowsCapability -Online -Name "OpenSSH.Server*"
-    if ($result.RestartNeeded -eq $true) {
-        Write-Host "  A restart will be required. Rebooting now..."
+    if ($result.RestartNeeded -eq $true -or $result.RestartNeeded -eq $True) {
+        Write-Host "  A restart is required. Rebooting now..."
         Restart-Computer -Force
         exit
     }
@@ -23,34 +23,60 @@ if ($cap.State -ne "Installed") {
     Write-Host "  OpenSSH Server already installed."
 }
 
-# 2. Try to find the sshd service (may be under different name)
-$sshd = Get-Service -Name "sshd" -ErrorAction SilentlyContinue
-if (-not $sshd) {
-    $sshd = Get-Service | Where-Object { $_.DisplayName -like "*OpenSSH*SSH*Server*" } | Select-Object -First 1
-}
-if (-not $sshd) {
-    Write-Host "  sshd service not found. Checking if deployment needs to be finalized..."
-    # Sometimes Start-Service deployment finalization helps
-    & "$env:SystemRoot\System32\OpenSSH\sshd.exe" --install 2>$null
-    Start-Sleep -Seconds 2
-    $sshd = Get-Service -Name "sshd" -ErrorAction SilentlyContinue
-}
-if (-not $sshd) {
-    Write-Host "  sshd service still not found. Attempting direct sshd execution..."
-    & "$env:SystemRoot\System32\OpenSSH\sshd.exe" 2>$null
-    Start-Sleep -Seconds 2
+# 2. Locate sshd.exe (could be in multiple possible locations)
+$sshdPaths = @(
+    "$env:SystemRoot\System32\OpenSSH\sshd.exe",
+    "$env:SystemRoot\SysWOW64\OpenSSH\sshd.exe",
+    "${env:ProgramFiles}\OpenSSH\bin\sshd.exe",
+    "${env:ProgramFiles(x86)}\OpenSSH\bin\sshd.exe",
+    "$env:SystemRoot\System32\sshd.exe"
+)
+
+$sshdPath = $null
+foreach ($p in $sshdPaths) {
+    if (Test-Path $p) {
+        $sshdPath = $p
+        break
+    }
 }
 
-if ($sshd) {
-    Set-Service -Name $sshd.Name -StartupType Automatic
-    Start-Service -Name $sshd.Name
+if (-not $sshdPath) {
+    Write-Host "  Searching all drives for sshd.exe..."
+    $sshdPath = Get-ChildItem -Path "$env:SystemDrive\" -Filter "sshd.exe" -Recurse -ErrorAction SilentlyContinue |
+        Select-Object -First 1 -ExpandProperty FullName
+}
+
+if (-not $sshdPath) {
+    Write-Host "  ERROR: sshd.exe not found anywhere. OpenSSH install may have failed." -ForegroundColor Red
+    Write-Host "  Try rebooting the VM and running this script again." -ForegroundColor Yellow
+    exit 1
+}
+
+Write-Host "  Found sshd.exe at: $sshdPath"
+
+# 3. Install and start the sshd service
+$sshdDir = Split-Path $sshdPath -Parent
+
+# Check if service already exists
+$sshdService = Get-Service -Name "sshd" -ErrorAction SilentlyContinue
+if (-not $sshdService) {
+    Write-Host "  Installing sshd service..."
+    & "$sshdPath" --install
+    Start-Sleep -Seconds 2
+    $sshdService = Get-Service -Name "sshd" -ErrorAction SilentlyContinue
+}
+
+if ($sshdService) {
+    Set-Service -Name $sshdService.Name -StartupType Automatic
+    Start-Service -Name $sshdService.Name
     Write-Host "  sshd service started (automatic startup)."
 } else {
-    Write-Host "  Could not register sshd as a service, but sshd may be running directly."
-    Write-Host "  Check with: Get-Process sshd"
+    Write-Host "  Service registration failed. Running sshd directly..."
+    Start-Process -FilePath $sshdPath -WindowStyle Hidden
+    Start-Sleep -Seconds 2
 }
 
-# 3. Firewall rule for SSH
+# 4. Firewall rule for SSH
 $fwRule = Get-NetFirewallRule -DisplayName "OpenSSH-Server-In-TCP" -ErrorAction SilentlyContinue
 if (-not $fwRule) {
     New-NetFirewallRule -DisplayName "OpenSSH-Server-In-TCP" `
@@ -61,7 +87,7 @@ if (-not $fwRule) {
     Write-Host "  Firewall rule already exists."
 }
 
-# 4. Create .ssh directory and authorized_keys for Administrator
+# 5. Create .ssh directory and authorized_keys for Administrator
 $sshDir = "$env:USERPROFILE\.ssh"
 $authKeys = Join-Path $sshDir "authorized_keys"
 if (-not (Test-Path $sshDir)) {
@@ -78,11 +104,21 @@ Write-Host "Or manually paste the gateway's public key into this file:" -Foregro
 Write-Host "  $authKeys" -ForegroundColor Cyan
 Write-Host ""
 
-# 5. Verify
-Write-Host "=== Service Status ===" -ForegroundColor Cyan
+# 6. Verify
+Write-Host "=== Verification ===" -ForegroundColor Cyan
+$svc = Get-Service -Name "sshd" -ErrorAction SilentlyContinue
 $proc = Get-Process -Name "sshd" -ErrorAction SilentlyContinue
-if ($proc) {
-    Write-Host "  sshd is RUNNING (PID: $($proc.Id))" -ForegroundColor Green
+if ($svc -and $svc.Status -eq "Running") {
+    Write-Host "  sshd service is RUNNING" -ForegroundColor Green
+} elseif ($proc) {
+    Write-Host "  sshd process is RUNNING (PID: $($proc.Id))" -ForegroundColor Green
 } else {
-    Write-Host "  sshd process not found. Try rebooting the VM." -ForegroundColor Yellow
+    Write-Host "  sshd is NOT running. Try rebooting the VM." -ForegroundColor Yellow
+}
+
+$port = netstat -ano | Select-String ":22 "
+if ($port) {
+    Write-Host "  SSH port 22 is LISTENING" -ForegroundColor Green
+} else {
+    Write-Host "  SSH port 22 is NOT listening" -ForegroundColor Red
 }
