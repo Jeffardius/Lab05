@@ -48,6 +48,9 @@ network:
   ethernets:
     $NAT_IFACE:
       dhcp4: true
+      dhcp4-overrides:
+        route-metric: 200
+      optional: true
     $EXT_IFACE:
       dhcp4: false
       addresses:

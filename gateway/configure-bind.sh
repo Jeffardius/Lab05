@@ -59,7 +59,7 @@ options {
 
 logging {
     channel default_log {
-        file "/var/log/bind/named.log" versions 3 size 5m;
+        file "/var/log/named/named.log" versions 3 size 5m;
         severity info;
         print-time yes;
         print-severity yes;
@@ -70,10 +70,22 @@ logging {
 };
 BINDEOF
 
-# Create log directory with proper permissions
-mkdir -p /var/log/bind
-chown bind:bind /var/log/bind
-chmod 750 /var/log/bind
+# Use AppArmor-compatible log directory
+# Default AppArmor profile allows /var/log/named/**, not /var/log/bind/**
+mkdir -p /var/log/named
+chown bind:bind /var/log/named
+chmod 750 /var/log/named
+
+# Ensure named waits for network before binding to the external IP
+# Default named.service has only After=network.target (too early)
+mkdir -p /etc/systemd/system/named.service.d
+cat > /etc/systemd/system/named.service.d/network-wait.conf <<SYSEOF
+[Unit]
+After=network-online.target
+Wants=network-online.target
+SYSEOF
+
+systemctl daemon-reload
 
 # Check config and restart
 echo "[BIND] Checking named configuration..."
